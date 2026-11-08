@@ -1,0 +1,32 @@
+services:
+    _defaults:
+        autowire: true
+        autoconfigure: true
+
+    Pdir\ContaoWorkmateAgentBundle\:
+        resource: '../src/*'
+        exclude:
+            - '../src/ContaoManager'
+            - '../src/DependencyInjection'
+            - '../src/PdirContaoWorkmateAgentBundle.php'
+            - '../src/Agent/AgentException.php'
+
+    Pdir\ContaoWorkmateAgentBundle\Agent\TokenVerifier:
+        arguments:
+            $projectDir: '%kernel.project_dir%'
+
+    Pdir\ContaoWorkmateAgentBundle\Agent\GitRepository:
+        arguments:
+            $projectDir: '%kernel.project_dir%'
+
+    Pdir\ContaoWorkmateAgentBundle\Agent\BackupExporter:
+        arguments:
+            $backupManager: '@contao.doctrine.backup_manager'
+
+    Pdir\ContaoWorkmateAgentBundle\Agent\Committer:
+        arguments:
+            $projectDir: '%kernel.project_dir%'
+
+    Pdir\ContaoWorkmateAgentBundle\Controller\AgentController:
+        public: true
+        tags: ['controller.service_arguments']

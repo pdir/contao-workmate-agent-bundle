@@ -1,0 +1,6 @@
+workmate_agent:
+    path: /_workmate/agent
+    controller: Pdir\ContaoWorkmateAgentBundle\Controller\AgentController
+    methods: [POST]
+    defaults:
+        _token_check: false

@@ -62,3 +62,7 @@ Optional env variables (`.env.local`):
 composer install
 vendor/bin/phpunit
 ```
+
+## License
+
+LGPL-3.0-or-later, see [LICENSE](LICENSE).

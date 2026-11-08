@@ -8,7 +8,7 @@ declare(strict_types=1);
  * Copyright (C) 2026 pdir / digital agentur // pdir GmbH
  *
  * @package    contao-workmate-agent-bundle
- * @license    proprietary
+ * @license    LGPL-3.0-or-later
  * @author     pdir GmbH <develop@pdir.de>
  */
 
@@ -20,7 +20,7 @@ namespace Pdir\ContaoWorkmateAgentBundle\Agent;
  */
 class Committer
 {
-    public const VERSION = '1.0.0';
+    public const VERSION = '1.0.1';
 
     public const DUMP = '_db/latest.sql';
 

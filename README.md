@@ -44,7 +44,19 @@ Optional env variables (`.env.local`):
 |---|---|
 | `WORKMATE_AGENT_TOKEN_HASH` | hash of the token, takes precedence over `composer.json` |
 | `WORKMATE_AGENT_GIT` | git binary, e.g. `/usr/bin/git` |
-| `WORKMATE_AGENT_SSH_KEY` | SSH key for the push, e.g. `/home/user/.ssh/id_ed25519_gitlab` |
+| `WORKMATE_AGENT_SSH_KEY` | SSH key for the push, e.g. `/home/user/.ssh/id_rsa_gitlab` |
+
+## Check
+
+Checks the project, PHP, Git and GitLab, nothing is changed (only `git push --dry-run`). Run it as the PHP user in
+the project directory:
+
+```bash
+vendor/bin/workmate-agent-check
+WORKMATE_TOKEN=<token> vendor/bin/workmate-agent-check --url https://www.example.org   # also calls the agent
+```
+
+Exit code 0 = ready, 1 = errors.
 
 ## API
 

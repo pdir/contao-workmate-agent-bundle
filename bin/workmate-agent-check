@@ -1,0 +1,330 @@
+#!/usr/bin/env bash
+#
+# Checks whether a Contao project is ready for the backup commits of the Workmate agent.
+# Run it as the PHP user (the user of PHP-FPM) in the project directory:
+#
+#   vendor/bin/workmate-agent-check
+#   WORKMATE_TOKEN=<Git-Token> vendor/bin/workmate-agent-check --url https://www.example.org
+#
+# Options:
+#   --dir <path>    project directory (default: current directory)
+#   --url <url>     also call POST <url>/_workmate/agent action=check (needs WORKMATE_TOKEN or --token)
+#   --token <token> token of the project ("Git-Token" in Workmate), better pass it as WORKMATE_TOKEN
+#
+# Nothing is changed: no commit, no push (only git push --dry-run), no backup.
+# Exit code 0 = no errors, 1 = errors.
+
+set -u
+
+DIR="$(pwd)"
+URL=""
+TOKEN="${WORKMATE_TOKEN:-}"
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --dir) DIR="${2:-}"; shift 2 ;;
+        --url) URL="${2%/}"; shift 2 ;;
+        --token) TOKEN="${2:-}"; shift 2 ;;
+        -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) echo "Unbekannte Option: $1" >&2; exit 2 ;;
+    esac
+done
+
+ERRORS=0
+WARNINGS=0
+
+if [ -t 1 ]; then
+    C_OK=$'\033[32m'; C_WARN=$'\033[33m'; C_FAIL=$'\033[31m'; C_HEAD=$'\033[1m'; C_END=$'\033[0m'
+else
+    C_OK=""; C_WARN=""; C_FAIL=""; C_HEAD=""; C_END=""
+fi
+
+ok()   { echo "  ${C_OK}OK${C_END}      $*"; }
+warn() { echo "  ${C_WARN}WARNUNG${C_END} $*"; WARNINGS=$((WARNINGS + 1)); }
+fail() { echo "  ${C_FAIL}FEHLER${C_END}  $*"; ERRORS=$((ERRORS + 1)); }
+info() { echo "          $*"; }
+section() { echo; echo "${C_HEAD}$*${C_END}"; }
+
+# value of a variable from the environment, .env.local or .env (last assignment wins, like Symfony)
+env_value() {
+    local name="$1" value="" file line
+    if [ -n "${!name:-}" ]; then
+        echo "${!name}"
+        return
+    fi
+    for file in "$DIR/.env" "$DIR/.env.local"; do
+        [ -f "$file" ] || continue
+        line="$(grep -E "^[[:space:]]*(export[[:space:]]+)?${name}=" "$file" | tail -n 1)"
+        [ -n "$line" ] && value="${line#*=}"
+    done
+    value="${value%\"}"; value="${value#\"}"; value="${value%\'}"; value="${value#\'}"
+    echo "$value"
+}
+
+cd "$DIR" 2>/dev/null || { echo "Verzeichnis $DIR nicht gefunden." >&2; exit 2; }
+DIR="$(pwd)"
+
+echo "Workmate-Agent: Prüfung von $DIR als $(id -un) ($(date '+%Y-%m-%d %H:%M'))"
+
+# ---------------------------------------------------------------------------------------------------------------------
+section "Projekt"
+
+if [ -f composer.json ]; then
+    ok "composer.json vorhanden"
+else
+    fail "keine composer.json, bitte im Contao-Root ausführen oder --dir angeben"
+    exit 1
+fi
+
+OWNER="$(stat -c '%U' . 2>/dev/null || stat -f '%Su' . 2>/dev/null)"
+if [ "$OWNER" = "$(id -un)" ]; then
+    ok "Projektordner gehört $(id -un)"
+else
+    warn "Projektordner gehört $OWNER, nicht $(id -un): läuft PHP-FPM als $(id -un)?"
+fi
+
+if [ -d vendor/pdir/contao-workmate-agent-bundle ]; then
+    VERSION="$(grep -o "VERSION = '[^']*'" vendor/pdir/contao-workmate-agent-bundle/src/Agent/Committer.php 2>/dev/null | cut -d"'" -f2)"
+    ok "Agent installiert (${VERSION:-unbekannte Version})"
+else
+    fail "Agent nicht installiert, in Workmate „Agent installieren“"
+fi
+
+TOKEN_HASH="$(env_value WORKMATE_AGENT_TOKEN_HASH)"
+if [ -z "$TOKEN_HASH" ]; then
+    TOKEN_HASH="$(grep -oE '"agent-token-hash"[[:space:]]*:[[:space:]]*"[a-f0-9]{64}"' composer.json | grep -oE '[a-f0-9]{64}')"
+fi
+if [ -n "$TOKEN_HASH" ]; then
+    ok "Prüfsumme des Tokens eingerichtet"
+else
+    fail "keine Prüfsumme in composer.json (extra.workmate.agent-token-hash), Agent in Workmate erneut installieren"
+fi
+
+if grep -qE '"url"[[:space:]]*:[[:space:]]*"https?://[^"/]*:[^"/]*@' composer.json; then
+    fail "Zugangsdaten in einer URL in composer.json, sie würden mitcommittet (→ auth.json, siehe README_PROJECT.md)"
+else
+    ok "keine Zugangsdaten in den URLs von composer.json"
+fi
+
+if [ -f contao-manager/auth.json ]; then
+    PERMS="$(stat -c '%a' contao-manager/auth.json 2>/dev/null || stat -f '%Lp' contao-manager/auth.json 2>/dev/null)"
+    if [ "${PERMS: -2}" = "00" ]; then
+        ok "contao-manager/auth.json nur für den Besitzer lesbar ($PERMS)"
+    else
+        warn "contao-manager/auth.json hat die Rechte $PERMS, besser chmod 600"
+    fi
+fi
+
+if [ -d var/backups ]; then
+    if [ -w var/backups ]; then ok "var/backups beschreibbar"; else fail "var/backups nicht beschreibbar"; fi
+fi
+
+if [ -e _db ] && [ ! -w _db ]; then
+    fail "_db nicht beschreibbar"
+elif [ ! -e _db ] && [ ! -w . ]; then
+    fail "Projektordner nicht beschreibbar, _db kann nicht angelegt werden"
+else
+    ok "_db/latest.sql kann geschrieben werden"
+fi
+
+# ---------------------------------------------------------------------------------------------------------------------
+section "PHP"
+
+if command -v php >/dev/null 2>&1; then
+    ok "PHP $(php -r 'echo PHP_VERSION;') (Kommandozeile)"
+    if [ "$(php -r 'echo function_exists("proc_open") ? 1 : 0;')" = "1" ]; then
+        ok "proc_open verfügbar (Kommandozeile)"
+    else
+        fail "proc_open ist deaktiviert (disable_functions), der Agent kann git nicht starten"
+    fi
+    info "PHP-FPM kann eine andere Konfiguration haben, das prüft erst --url"
+else
+    warn "php nicht im PATH, proc_open nicht geprüft"
+fi
+
+# ---------------------------------------------------------------------------------------------------------------------
+section "Git"
+
+GIT="$(env_value WORKMATE_AGENT_GIT)"
+GIT="${GIT:-git}"
+if command -v "$GIT" >/dev/null 2>&1; then
+    ok "$($GIT --version) ($(command -v "$GIT"))"
+else
+    fail "git nicht gefunden ($GIT), installieren oder WORKMATE_AGENT_GIT setzen"
+    GIT=""
+fi
+
+SSH_KEY="$(env_value WORKMATE_AGENT_SSH_KEY)"
+if [ -n "$SSH_KEY" ]; then
+    export GIT_SSH_COMMAND="ssh -i '$SSH_KEY' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+fi
+export GIT_TERMINAL_PROMPT=0 LANG=C
+
+REMOTE=""
+if [ -n "$GIT" ]; then
+    if [ "$($GIT rev-parse --show-toplevel 2>/dev/null)" = "$DIR" ]; then
+        ok "Git-Checkout"
+    elif $GIT rev-parse --git-dir >/dev/null 2>&1; then
+        fail "Git-Checkout beginnt nicht im Projektordner, sondern in $($GIT rev-parse --show-toplevel)"
+    else
+        fail "kein Git-Checkout (git init, siehe README_PROJECT.md Schritt 2)"
+        GIT=""
+    fi
+fi
+
+if [ -n "$GIT" ]; then
+    GIT_DIR="$($GIT rev-parse --absolute-git-dir 2>/dev/null)"
+    if [ -w "$GIT_DIR" ] && [ -z "$(find "$GIT_DIR" ! -writable -print -quit 2>/dev/null)" ]; then
+        ok ".git beschreibbar"
+    else
+        fail ".git ist nicht überall beschreibbar (chown -R $(id -un) .git)"
+    fi
+
+    BRANCH="$($GIT rev-parse --abbrev-ref HEAD 2>/dev/null)"
+    if [ -z "$BRANCH" ] || [ "$BRANCH" = "HEAD" ]; then
+        fail "kein Branch ausgecheckt (detached HEAD)"
+    else
+        ok "Branch $BRANCH"
+    fi
+
+    REMOTE="$($GIT remote get-url origin 2>/dev/null)"
+    if [ -n "$REMOTE" ]; then
+        ok "Remote origin: $REMOTE"
+    else
+        fail "kein Remote origin (git remote add origin <GIT_REMOTE>)"
+    fi
+
+    if $GIT check-ignore -q _db/latest.sql; then
+        fail "_db/latest.sql wird ignoriert: $($GIT check-ignore -v _db/latest.sql)"
+    else
+        ok "_db/latest.sql wird nicht ignoriert"
+    fi
+
+    for file in composer.json composer.lock; do
+        if $GIT check-ignore -q "$file"; then fail "$file wird ignoriert"; fi
+    done
+
+    if [ -n "$($GIT config user.name)" ] && [ -n "$($GIT config user.email)" ]; then
+        info "Autor: $($GIT config user.name) <$($GIT config user.email)>"
+    else
+        info "kein git-Autor eingerichtet, der Agent committet als Workmate"
+    fi
+fi
+
+# ---------------------------------------------------------------------------------------------------------------------
+section "GitLab"
+
+if [ -n "$SSH_KEY" ]; then
+    if [ ! -f "$SSH_KEY" ]; then
+        fail "WORKMATE_AGENT_SSH_KEY=$SSH_KEY existiert nicht"
+    elif [ ! -r "$SSH_KEY" ]; then
+        fail "WORKMATE_AGENT_SSH_KEY=$SSH_KEY ist nicht lesbar"
+    else
+        KEY_PERMS="$(stat -c '%a' "$SSH_KEY" 2>/dev/null || stat -f '%Lp' "$SSH_KEY" 2>/dev/null)"
+        if [ "${KEY_PERMS: -2}" = "00" ]; then ok "SSH-Key $SSH_KEY"; else fail "SSH-Key hat die Rechte $KEY_PERMS, ssh verlangt chmod 600"; fi
+    fi
+else
+    info "WORKMATE_AGENT_SSH_KEY nicht gesetzt, git nutzt den Standard-Key von $(id -un)"
+fi
+
+case "$REMOTE" in
+    ssh://*)
+        HOSTPART="${REMOTE#ssh://}"; HOSTPART="${HOSTPART%%/*}"
+        SSH_USER="${HOSTPART%@*}"; [ "$SSH_USER" = "$HOSTPART" ] && SSH_USER="git"
+        HOSTPORT="${HOSTPART#*@}"; SSH_HOST="${HOSTPORT%:*}"; SSH_PORT="${HOSTPORT##*:}"
+        [ "$SSH_PORT" = "$HOSTPORT" ] && SSH_PORT=22
+        ;;
+    *@*:*)
+        SSH_USER="${REMOTE%@*}"; SSH_HOST="${REMOTE#*@}"; SSH_HOST="${SSH_HOST%%:*}"; SSH_PORT=22
+        ;;
+    *)
+        SSH_HOST=""
+        ;;
+esac
+
+if [ -n "${SSH_HOST:-}" ]; then
+    SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new -p "$SSH_PORT")
+    [ -n "$SSH_KEY" ] && SSH_OPTS+=(-i "$SSH_KEY" -o IdentitiesOnly=yes)
+    SSH_OUT="$(ssh "${SSH_OPTS[@]}" -T "$SSH_USER@$SSH_HOST" 2>&1)"
+    if echo "$SSH_OUT" | grep -qiE 'welcome to gitlab|successfully authenticated'; then
+        ok "SSH-Anmeldung bei $SSH_HOST:$SSH_PORT ($(echo "$SSH_OUT" | head -n 1))"
+    else
+        fail "SSH-Anmeldung bei $SSH_HOST:$SSH_PORT: $(echo "$SSH_OUT" | tail -n 1)"
+    fi
+elif [ -n "$REMOTE" ]; then
+    info "kein SSH-Remote, die Anmeldung prüft git fetch"
+fi
+
+if [ -n "$GIT" ] && [ -n "$REMOTE" ]; then
+    if FETCH_OUT="$($GIT fetch --quiet origin 2>&1)"; then
+        ok "git fetch"
+        UPSTREAM="origin/${BRANCH:-}"
+        if $GIT rev-parse --verify --quiet "$UPSTREAM" >/dev/null; then
+            if $GIT merge-base --is-ancestor "$UPSTREAM" HEAD 2>/dev/null; then
+                AHEAD="$($GIT rev-list --count "$UPSTREAM"..HEAD)"
+                ok "Verlauf baut auf $UPSTREAM auf ($AHEAD Commit(s) noch nicht gepusht)"
+            else
+                fail "Verlauf baut nicht auf $UPSTREAM auf, der Push wird abgelehnt (git reset $UPSTREAM)"
+            fi
+        elif [ -n "$($GIT ls-remote --heads origin 2>/dev/null)" ]; then
+            warn "$UPSTREAM gibt es nicht, der Push legt einen neuen Branch an"
+        else
+            ok "Repository auf GitLab ist leer, der erste Push legt $BRANCH an"
+        fi
+
+        if PUSH_OUT="$($GIT push --dry-run --porcelain origin HEAD 2>&1)"; then
+            ok "git push --dry-run"
+            info "ob ein geschützter Branch den Push erlaubt, zeigt erst ein echter Push"
+        else
+            fail "git push --dry-run: $(echo "$PUSH_OUT" | grep -vE '^(To |Done)' | tail -n 2 | tr '\n' ' ')"
+        fi
+    else
+        fail "git fetch: $(echo "$FETCH_OUT" | tail -n 2 | tr '\n' ' ')"
+    fi
+fi
+
+# ---------------------------------------------------------------------------------------------------------------------
+if [ -n "$URL" ]; then
+    section "Agent ($URL/_workmate/agent)"
+
+    if [ -z "$TOKEN" ]; then
+        fail "kein Token, WORKMATE_TOKEN=<Git-Token> setzen"
+    elif ! command -v curl >/dev/null 2>&1; then
+        fail "curl nicht gefunden"
+    else
+        RESPONSE="$(curl -sS --max-time 30 -w '\n%{http_code}' -X POST -H "X-Workmate-Token: $TOKEN" -H 'Accept: application/json' -d action=check "$URL/_workmate/agent" 2>&1)"
+        CODE="$(echo "$RESPONSE" | tail -n 1)"
+        BODY="$(echo "$RESPONSE" | sed '$d')"
+
+        case "$CODE" in
+            200)
+                if echo "$BODY" | grep -q '"ok":true'; then
+                    ok "Agent antwortet: $BODY"
+                    echo "$BODY" | grep -q '"dumpIgnored":true' && fail "der Agent meldet: _db/latest.sql wird ignoriert"
+                    if [ -n "$REMOTE" ] && ! echo "$BODY" | grep -qF "\"remote\":\"$(echo "$REMOTE" | sed 's#/#\\/#g')\""; then
+                        warn "der Agent meldet ein anderes Remote als $REMOTE, läuft PHP-FPM in einem anderen Ordner?"
+                    fi
+                else
+                    fail "Agent: $BODY"
+                fi
+                ;;
+            403) fail "HTTP 403: $BODY (Token passt nicht zur Prüfsumme)" ;;
+            404) fail "HTTP 404: Agent nicht erreichbar (nicht installiert oder var/cache/prod löschen)" ;;
+            500) fail "HTTP 500: $BODY" ;;
+            *) fail "HTTP $CODE: $(echo "$BODY" | sed "s/<[^>]*>//g" | tr -s " \n" " " | head -c 200)" ;;
+        esac
+    fi
+else
+    echo
+    info "Agent über HTTP (PHP-FPM, proc_open, Token): mit --url https://<DOMAIN> und WORKMATE_TOKEN prüfen"
+fi
+
+# ---------------------------------------------------------------------------------------------------------------------
+echo
+if [ "$ERRORS" -eq 0 ]; then
+    echo "${C_OK}Bereit für die Backup-Commits${C_END} ($WARNINGS Warnung(en))."
+    exit 0
+fi
+
+echo "${C_FAIL}$ERRORS Fehler${C_END}, $WARNINGS Warnung(en)."
+exit 1

@@ -26,6 +26,9 @@
     "conflict": {
         "contao/manager-plugin": "<2.0 || >=3.0"
     },
+    "bin": [
+        "bin/workmate-agent-check"
+    ],
     "autoload": {
         "psr-4": {
             "Pdir\\ContaoWorkmateAgentBundle\\": "src/"

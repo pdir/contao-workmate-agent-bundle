@@ -11,7 +11,8 @@
 #   --dir <path>    project directory (default: current directory)
 #   --url <url>     also call POST <url>/_workmate/agent action=check (needs WORKMATE_TOKEN or --token)
 #   --token <token> token of the project ("Git-Token" in Workmate), better pass it as WORKMATE_TOKEN
-#   --fix           fix what can be fixed safely: chmod 600 for contao-manager/auth.json and the SSH key of
+#   --fix           fix what can be fixed safely: an empty .env (Contao loads .env.local only with .env),
+#                   chmod 600 for contao-manager/auth.json and the SSH key of
 #                   WORKMATE_AGENT_SSH_KEY (only if the file belongs to the current user, otherwise the Contao
 #                   Manager or ssh could not read it any more)
 #
@@ -74,11 +75,20 @@ check_private_file() {
 info() { echo "          $*"; }
 section() { echo; echo "${C_HEAD}$*${C_END}"; }
 
-# value of a variable from the environment, .env.local or .env (last assignment wins, like Symfony)
+# value of a variable like Contao reads it (ContaoKernel::loadEnv()): from the environment, otherwise from
+# .env.local.php if it exists, otherwise from .env and .env.local, but only if .env exists (last assignment wins)
 env_value() {
     local name="$1" value="" file line
     if [ -n "${!name:-}" ]; then
         echo "${!name}"
+        return
+    fi
+    if [ -f "$DIR/.env.local.php" ] && command -v php >/dev/null 2>&1; then
+        php -r '$e = @include $argv[1]; echo is_array($e) && isset($e[$argv[2]]) && is_scalar($e[$argv[2]]) ? $e[$argv[2]] : "";' "$DIR/.env.local.php" "$name"
+        return
+    fi
+    if [ ! -f "$DIR/.env" ]; then
+        echo ""
         return
     fi
     for file in "$DIR/.env" "$DIR/.env.local"; do
@@ -104,6 +114,20 @@ if [ -f composer.json ]; then
 else
     fail "keine composer.json, bitte im Contao-Root ausführen oder --dir angeben"
     exit 1
+fi
+
+# Contao loads .env.local only together with .env, a .env.local.php replaces both
+if [ -f .env.local.php ]; then
+    warn ".env.local.php vorhanden: Contao liest nur diese Datei, .env und .env.local werden ignoriert (composer dump-env prod nach Änderungen)"
+elif [ -f .env ]; then
+    ok ".env vorhanden, Contao lädt .env und .env.local"
+elif [ "$FIX" -eq 1 ]; then
+    printf '# defaults, local settings in .env.local (Contao loads .env.local only if .env exists)\n' > .env
+    fixed ".env angelegt, Contao lädt jetzt auch .env.local"
+elif [ -f .env.local ]; then
+    fail ".env fehlt: Contao lädt .env.local nur zusammen mit .env, leere .env anlegen (oder mit --fix ausführen)"
+else
+    warn "weder .env noch .env.local: die Einstellungen des Agents fehlen (oder mit --fix eine .env anlegen)"
 fi
 
 OWNER="$(stat -c '%U' . 2>/dev/null || stat -f '%Su' . 2>/dev/null)"

@@ -10,6 +10,14 @@ Types of changes
     Security in case of vulnerabilities.
 )
 
+## [1.0.1](https://github.com/pdir/contao-workmate-agent-bundle/tree/1.0.1) – 2026-11-10
+
+**Check script**
+
+- [Fixed] The commit author is read like Contao reads the environment: only `.env.local.php` if it exists, otherwise `.env` and `.env.local`, and `.env.local` only if `.env` exists
+- [Added] Checks that `.env` exists, Contao ignores `.env.local` without it; `--fix` creates an empty `.env`
+- [Added] Warning if `.env.local.php` exists, changes in `.env.local` need `composer dump-env prod` then
+
 ## [1.0.0](https://github.com/pdir/contao-workmate-agent-bundle/tree/1.0.0) – 2026-11-10
 
 Initial release.

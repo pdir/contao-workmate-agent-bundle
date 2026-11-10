@@ -20,7 +20,7 @@ namespace Pdir\ContaoWorkmateAgentBundle\Agent;
  */
 class Committer
 {
-    public const VERSION = '1.0.2';
+    public const VERSION = '1.0.1';
 
     public const DUMP = '_db/latest.sql';
 

@@ -50,15 +50,20 @@ class Committer
 
     public function check(): array
     {
-        [$code, $branch] = $this->git->run(['rev-parse', '--abbrev-ref', 'HEAD']);
+        [$code, $output] = $this->git->run(['rev-parse', '--git-dir']);
 
         if (0 !== $code) {
-            throw new AgentException('Kein Git-Repository oder git nicht verfügbar: '.$branch);
+            throw new AgentException('Kein Git-Repository oder git nicht verfügbar: '.$output);
         }
+
+        // symbolic-ref also works for a branch without commits, null = detached HEAD
+        [$code, $branch] = $this->git->run(['symbolic-ref', '--short', '-q', 'HEAD']);
+        $branch = 0 === $code && '' !== $branch ? $branch : null;
 
         [, $remote] = $this->git->run(['remote', 'get-url', 'origin']);
         [, $status] = $this->git->run(['status', '--porcelain', '--untracked-files=no']);
         [, $ignored] = $this->git->run(['check-ignore', self::DUMP]);
+        $author = $this->git->author();
 
         return [
             'ok' => true,
@@ -67,6 +72,7 @@ class Committer
             'remote' => $remote,
             'clean' => '' === $status,
             'dumpIgnored' => '' !== $ignored,
+            'author' => null !== $author ? $author['name'].' <'.$author['email'].'>' : null,
         ];
     }
 
@@ -75,7 +81,12 @@ class Committer
      */
     public function commit(string $message): array
     {
-        $this->check();
+        if (null === $this->check()['branch']) {
+            throw new AgentException('Kein Branch ausgecheckt (detached HEAD), der Commit könnte nicht gepusht werden (git switch <branch>).');
+        }
+
+        // before the backup, so a missing author fails fast
+        $authorOptions = $this->git->authorOptions();
 
         $message = trim((string) preg_replace('/[\x00-\x1F\x7F]+/', ' ', $message));
         $message = '' !== $message ? substr($message, 0, 200) : 'workmate backup';
@@ -94,7 +105,7 @@ class Committer
             return ['ok' => true, 'commit' => '', 'backup' => $backup, 'message' => 'Keine Änderungen, kein Commit.'];
         }
 
-        $this->git->mustRun(array_merge($this->git->authorOptions(), ['commit', '-m', $message, '--'], $files));
+        $this->git->mustRun(array_merge($authorOptions, ['commit', '-m', $message, '--'], $files));
         $commit = $this->git->mustRun(['rev-parse', 'HEAD']);
         $this->git->mustRun(['push', 'origin', 'HEAD']);
 

@@ -4,14 +4,18 @@
 # Run it as the PHP user (the user of PHP-FPM) in the project directory:
 #
 #   vendor/bin/workmate-agent-check
+#   vendor/bin/workmate-agent-check --fix
 #   WORKMATE_TOKEN=<Git-Token> vendor/bin/workmate-agent-check --url https://www.example.org
 #
 # Options:
 #   --dir <path>    project directory (default: current directory)
 #   --url <url>     also call POST <url>/_workmate/agent action=check (needs WORKMATE_TOKEN or --token)
 #   --token <token> token of the project ("Git-Token" in Workmate), better pass it as WORKMATE_TOKEN
+#   --fix           fix what can be fixed safely: chmod 600 for contao-manager/auth.json and the SSH key of
+#                   WORKMATE_AGENT_SSH_KEY (only if the file belongs to the current user, otherwise the Contao
+#                   Manager or ssh could not read it any more)
 #
-# Nothing is changed: no commit, no push (only git push --dry-run), no backup.
+# Without --fix nothing is changed: no commit, no push (only git push --dry-run), no backup.
 # Exit code 0 = no errors, 1 = errors.
 
 set -u
@@ -19,19 +23,22 @@ set -u
 DIR="$(pwd)"
 URL=""
 TOKEN="${WORKMATE_TOKEN:-}"
+FIX=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --dir) DIR="${2:-}"; shift 2 ;;
         --url) URL="${2%/}"; shift 2 ;;
         --token) TOKEN="${2:-}"; shift 2 ;;
-        -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --fix) FIX=1; shift ;;
+        -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "Unbekannte Option: $1" >&2; exit 2 ;;
     esac
 done
 
 ERRORS=0
 WARNINGS=0
+FIXED=0
 
 if [ -t 1 ]; then
     C_OK=$'\033[32m'; C_WARN=$'\033[33m'; C_FAIL=$'\033[31m'; C_HEAD=$'\033[1m'; C_END=$'\033[0m'
@@ -42,6 +49,28 @@ fi
 ok()   { echo "  ${C_OK}OK${C_END}      $*"; }
 warn() { echo "  ${C_WARN}WARNUNG${C_END} $*"; WARNINGS=$((WARNINGS + 1)); }
 fail() { echo "  ${C_FAIL}FEHLER${C_END}  $*"; ERRORS=$((ERRORS + 1)); }
+fixed() { echo "  ${C_OK}BEHOBEN${C_END} $*"; FIXED=$((FIXED + 1)); }
+
+# a file that only its owner may read (chmod 600), with --fix the rights are set if the file belongs to the current
+# user: check_private_file <file> <ok message> <warn|fail> <hint>
+check_private_file() {
+    local file="$1" label="$2" level="$3" hint="$4" perms owner
+    perms="$(stat -c '%a' "$file" 2>/dev/null || stat -f '%Lp' "$file" 2>/dev/null)"
+    if [ "${perms: -2}" = "00" ]; then
+        ok "$label ($perms)"
+    elif [ "$FIX" -eq 0 ]; then
+        "$level" "$file hat die Rechte $perms, $hint (oder mit --fix ausführen)"
+    else
+        owner="$(stat -c '%U' "$file" 2>/dev/null || stat -f '%Su' "$file" 2>/dev/null)"
+        if [ "$owner" != "$(id -un)" ]; then
+            "$level" "$file hat die Rechte $perms, nicht geändert: gehört $owner, nicht $(id -un)"
+        elif chmod 600 "$file" 2>/dev/null; then
+            fixed "$file: Rechte $perms → 600"
+        else
+            "$level" "$file hat die Rechte $perms, chmod 600 fehlgeschlagen"
+        fi
+    fi
+}
 info() { echo "          $*"; }
 section() { echo; echo "${C_HEAD}$*${C_END}"; }
 
@@ -65,6 +94,7 @@ cd "$DIR" 2>/dev/null || { echo "Verzeichnis $DIR nicht gefunden." >&2; exit 2; 
 DIR="$(pwd)"
 
 echo "Workmate-Agent: Prüfung von $DIR als $(id -un) ($(date '+%Y-%m-%d %H:%M'))"
+[ "$FIX" -eq 1 ] && echo "Mit --fix: sichere Korrekturen werden direkt ausgeführt."
 
 # ---------------------------------------------------------------------------------------------------------------------
 section "Projekt"
@@ -107,12 +137,7 @@ else
 fi
 
 if [ -f contao-manager/auth.json ]; then
-    PERMS="$(stat -c '%a' contao-manager/auth.json 2>/dev/null || stat -f '%Lp' contao-manager/auth.json 2>/dev/null)"
-    if [ "${PERMS: -2}" = "00" ]; then
-        ok "contao-manager/auth.json nur für den Besitzer lesbar ($PERMS)"
-    else
-        warn "contao-manager/auth.json hat die Rechte $PERMS, besser chmod 600"
-    fi
+    check_private_file contao-manager/auth.json "contao-manager/auth.json nur für den Besitzer lesbar" warn "besser chmod 600"
 fi
 
 if [ -d var/backups ]; then
@@ -174,15 +199,40 @@ fi
 
 if [ -n "$GIT" ]; then
     GIT_DIR="$($GIT rev-parse --absolute-git-dir 2>/dev/null)"
-    if [ -w "$GIT_DIR" ] && [ -z "$(find "$GIT_DIR" ! -writable -print -quit 2>/dev/null)" ]; then
+    # only the directories must be writable: git writes new files and renames them (HEAD, index, refs), the object
+    # files are read-only (444) by design and are never changed
+    NOT_WRITABLE="$(find "$GIT_DIR" -type d 2>/dev/null | while IFS= read -r d; do [ -w "$d" ] || { echo "$d"; break; }; done)"
+    if [ -z "$NOT_WRITABLE" ]; then
         ok ".git beschreibbar"
     else
-        fail ".git ist nicht überall beschreibbar (chown -R $(id -un) .git)"
+        NW_OWNER="$(stat -c '%U' "$NOT_WRITABLE" 2>/dev/null || stat -f '%Su' "$NOT_WRITABLE" 2>/dev/null)"
+        NW_COUNT="$(find "$GIT_DIR" -type d 2>/dev/null | while IFS= read -r d; do [ -w "$d" ] || echo "$d"; done | wc -l | tr -d ' ')"
+        if [ "$NW_OWNER" = "$(id -un)" ]; then
+            fail ".git: $NW_COUNT Verzeichnis(se) nicht beschreibbar, z. B. ${NOT_WRITABLE#"$DIR"/} (chmod -R u+w .git)"
+        else
+            fail ".git: $NW_COUNT Verzeichnis(se) nicht beschreibbar, z. B. ${NOT_WRITABLE#"$DIR"/} gehört $NW_OWNER (chown -R $(id -un) .git, ggf. durch den Hoster)"
+        fi
     fi
 
-    BRANCH="$($GIT rev-parse --abbrev-ref HEAD 2>/dev/null)"
-    if [ -z "$BRANCH" ] || [ "$BRANCH" = "HEAD" ]; then
-        fail "kein Branch ausgecheckt (detached HEAD)"
+    # symbolic-ref also works for a branch without commits (git init), rev-parse --abbrev-ref would say "HEAD"
+    BRANCH="$($GIT symbolic-ref --short -q HEAD 2>/dev/null)"
+    UNBORN=0
+    $GIT rev-parse --verify -q HEAD >/dev/null 2>&1 || UNBORN=1
+    if [ -z "$BRANCH" ]; then
+        # branches that point exactly to the checked out commit: switching to them changes no files
+        HEAD_SHA="$($GIT rev-parse --short HEAD 2>/dev/null)"
+        CANDIDATES="$($GIT for-each-ref --points-at HEAD --format='%(refname:short)' refs/heads refs/remotes 2>/dev/null | grep -vE '/HEAD$' | sed 's#^origin/##' | sort -u | tr '\n' ' ' | sed 's/ $//')"
+        fail "kein Branch ausgecheckt (detached HEAD bei ${HEAD_SHA:-?}), der Agent kann so nicht pushen"
+        if [ -n "$CANDIDATES" ]; then
+            info "der Commit ist der Stand von: $CANDIDATES"
+            info "beheben ohne Dateiänderung: git switch ${CANDIDATES%% *}"
+        else
+            info "kein Branch zeigt auf diesen Commit, prüfen mit: git status und git log --oneline -3 --all"
+            info "dann den passenden Branch auschecken: git switch <branch>"
+        fi
+        info "checkt ein Deployment (z. B. per Tag oder Commit) immer detached aus, tritt der Fehler danach wieder auf"
+    elif [ "$UNBORN" -eq 1 ]; then
+        ok "Branch $BRANCH (noch ohne Commit)"
     else
         ok "Branch $BRANCH"
     fi
@@ -204,10 +254,14 @@ if [ -n "$GIT" ]; then
         if $GIT check-ignore -q "$file"; then fail "$file wird ignoriert"; fi
     done
 
-    if [ -n "$($GIT config user.name)" ] && [ -n "$($GIT config user.email)" ]; then
-        info "Autor: $($GIT config user.name) <$($GIT config user.email)>"
+    AUTHOR_NAME="$(env_value WORKMATE_AGENT_AUTHOR_NAME)"
+    AUTHOR_EMAIL="$(env_value WORKMATE_AGENT_AUTHOR_EMAIL)"
+    if [ -z "$AUTHOR_NAME" ] || [ -z "$AUTHOR_EMAIL" ]; then
+        fail "WORKMATE_AGENT_AUTHOR_NAME und WORKMATE_AGENT_AUTHOR_EMAIL müssen in der .env.local gesetzt sein (Autor der Commits)"
+    elif ! echo "$AUTHOR_EMAIL" | grep -qE '^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$'; then
+        fail "WORKMATE_AGENT_AUTHOR_EMAIL=$AUTHOR_EMAIL ist keine gültige E-Mail-Adresse"
     else
-        info "kein git-Autor eingerichtet, der Agent committet als Workmate"
+        ok "Autor der Commits: $AUTHOR_NAME <$AUTHOR_EMAIL>"
     fi
 fi
 
@@ -220,8 +274,7 @@ if [ -n "$SSH_KEY" ]; then
     elif [ ! -r "$SSH_KEY" ]; then
         fail "WORKMATE_AGENT_SSH_KEY=$SSH_KEY ist nicht lesbar"
     else
-        KEY_PERMS="$(stat -c '%a' "$SSH_KEY" 2>/dev/null || stat -f '%Lp' "$SSH_KEY" 2>/dev/null)"
-        if [ "${KEY_PERMS: -2}" = "00" ]; then ok "SSH-Key $SSH_KEY"; else fail "SSH-Key hat die Rechte $KEY_PERMS, ssh verlangt chmod 600"; fi
+        check_private_file "$SSH_KEY" "SSH-Key $SSH_KEY" fail "ssh verlangt chmod 600"
     fi
 else
     info "WORKMATE_AGENT_SSH_KEY nicht gesetzt, git nutzt den Standard-Key von $(id -un)"
@@ -259,7 +312,14 @@ if [ -n "$GIT" ] && [ -n "$REMOTE" ]; then
     if FETCH_OUT="$($GIT fetch --quiet origin 2>&1)"; then
         ok "git fetch"
         UPSTREAM="origin/${BRANCH:-}"
-        if $GIT rev-parse --verify --quiet "$UPSTREAM" >/dev/null; then
+        if [ -z "${BRANCH:-}" ]; then
+            info "Verlauf und Push nicht geprüft, kein Branch ausgecheckt"
+        elif [ "$UNBORN" -eq 1 ] && $GIT rev-parse --verify --quiet "$UPSTREAM" >/dev/null; then
+            fail "$BRANCH hat noch keinen Commit, $UPSTREAM aber schon ($($GIT log -1 --format='%h %s' "$UPSTREAM")): der erste Commit des Agents hätte keinen gemeinsamen Verlauf, der Push wird abgelehnt"
+            info "beheben ohne Dateiänderung: git reset $UPSTREAM (übernimmt den Verlauf, die Dateien im Projektordner bleiben)"
+        elif [ "$UNBORN" -eq 1 ]; then
+            ok "$BRANCH hat noch keinen Commit, der erste Push legt $UPSTREAM an"
+        elif $GIT rev-parse --verify --quiet "$UPSTREAM" >/dev/null; then
             if $GIT merge-base --is-ancestor "$UPSTREAM" HEAD 2>/dev/null; then
                 AHEAD="$($GIT rev-list --count "$UPSTREAM"..HEAD)"
                 ok "Verlauf baut auf $UPSTREAM auf ($AHEAD Commit(s) noch nicht gepusht)"
@@ -272,7 +332,11 @@ if [ -n "$GIT" ] && [ -n "$REMOTE" ]; then
             ok "Repository auf GitLab ist leer, der erste Push legt $BRANCH an"
         fi
 
-        if PUSH_OUT="$($GIT push --dry-run --porcelain origin HEAD 2>&1)"; then
+        if [ -z "${BRANCH:-}" ]; then
+            :
+        elif [ "$UNBORN" -eq 1 ]; then
+            info "git push --dry-run nicht möglich, solange $BRANCH keinen Commit hat"
+        elif PUSH_OUT="$($GIT push --dry-run --porcelain origin HEAD 2>&1)"; then
             ok "git push --dry-run"
             info "ob ein geschützter Branch den Push erlaubt, zeigt erst ein echter Push"
         else
@@ -301,6 +365,7 @@ if [ -n "$URL" ]; then
                 if echo "$BODY" | grep -q '"ok":true'; then
                     ok "Agent antwortet: $BODY"
                     echo "$BODY" | grep -q '"dumpIgnored":true' && fail "der Agent meldet: _db/latest.sql wird ignoriert"
+                    echo "$BODY" | grep -q '"author":null' && fail "der Agent meldet: kein Autor, WORKMATE_AGENT_AUTHOR_NAME/EMAIL fehlen für PHP-FPM"
                     if [ -n "$REMOTE" ] && ! echo "$BODY" | grep -qF "\"remote\":\"$(echo "$REMOTE" | sed 's#/#\\/#g')\""; then
                         warn "der Agent meldet ein anderes Remote als $REMOTE, läuft PHP-FPM in einem anderen Ordner?"
                     fi
@@ -321,6 +386,7 @@ fi
 
 # ---------------------------------------------------------------------------------------------------------------------
 echo
+[ "$FIXED" -gt 0 ] && echo "$FIXED Problem(e) mit --fix behoben."
 if [ "$ERRORS" -eq 0 ]; then
     echo "${C_OK}Bereit für die Backup-Commits${C_END} ($WARNINGS Warnung(en))."
     exit 0

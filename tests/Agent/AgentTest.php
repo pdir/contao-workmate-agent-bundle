@@ -49,6 +49,8 @@ class AgentTest extends TestCase
 
         putenv('HOME='.$this->dir);
         putenv('GIT_CONFIG_NOSYSTEM=1');
+        putenv('WORKMATE_AGENT_AUTHOR_NAME=Agentur Test');
+        putenv('WORKMATE_AGENT_AUTHOR_EMAIL=agent@example.org');
 
         file_put_contents($this->project.'/composer.json', json_encode(['extra' => ['workmate' => ['agent-token-hash' => hash('sha256', self::TOKEN)]]]));
         file_put_contents($this->project.'/.gitignore', "/vendor/\n/var/\n");
@@ -65,6 +67,8 @@ class AgentTest extends TestCase
     {
         (new Filesystem())->remove($this->dir);
         putenv('WORKMATE_AGENT_TOKEN_HASH');
+        putenv('WORKMATE_AGENT_AUTHOR_NAME');
+        putenv('WORKMATE_AGENT_AUTHOR_EMAIL');
     }
 
     public function testTokenFromComposerJson(): void
@@ -112,6 +116,7 @@ class AgentTest extends TestCase
         $this->assertSame('main', $data['branch']);
         $this->assertTrue($data['clean']);
         $this->assertFalse($data['dumpIgnored']);
+        $this->assertSame('Agentur Test <agent@example.org>', $data['author']);
     }
 
     public function testCommitsDumpComposerJsonAndLock(): void
@@ -126,6 +131,7 @@ class AgentTest extends TestCase
         $this->assertSame(40, \strlen($data['commit']));
         $this->assertSame("INSERT INTO tl_page VALUES (1);\n", file_get_contents($this->project.'/_db/latest.sql'));
         $this->assertSame('contao update 5.3.44 x', $this->git($this->dir.'/remote.git', ['log', '-1', '--format=%s', 'main']));
+        $this->assertSame('Agentur Test <agent@example.org>', $this->git($this->dir.'/remote.git', ['log', '-1', '--format=%an <%ae>', 'main']));
         $this->assertSame("_db/latest.sql\ncomposer.lock", $this->git($this->dir.'/remote.git', ['show', '--name-only', '--format=', 'main']));
         $this->assertStringContainsString('?? other.txt', $this->git($this->project, ['status', '--porcelain']));
 
@@ -133,6 +139,71 @@ class AgentTest extends TestCase
         $data = json_decode((string) $this->controller("INSERT INTO tl_page VALUES (1);\n")($this->request(self::TOKEN, ['action' => 'commit', 'message' => 'again']))->getContent(), true);
 
         $this->assertSame('', $data['commit']);
+    }
+
+    public function testCommitOnBranchWithoutCommits(): void
+    {
+        (new Filesystem())->remove([$this->project.'/.git', $this->dir.'/remote.git']);
+        $this->git($this->dir, ['init', '--bare', '-q', 'remote.git']);
+        $this->git($this->project, ['init', '-q', '-b', 'main']);
+        $this->git($this->project, ['remote', 'add', 'origin', $this->dir.'/remote.git']);
+
+        $check = json_decode((string) $this->controller()($this->request(self::TOKEN, ['action' => 'check']))->getContent(), true);
+        $response = $this->controller()($this->request(self::TOKEN, ['action' => 'commit', 'message' => 'first']));
+
+        $this->assertSame('main', $check['branch']);
+        $this->assertSame(200, $response->getStatusCode(), (string) $response->getContent());
+        $this->assertSame('first', $this->git($this->dir.'/remote.git', ['log', '-1', '--format=%s', 'main']));
+    }
+
+    public function testDetachedHeadIsRejectedBeforeTheBackup(): void
+    {
+        $this->git($this->project, ['checkout', '-q', '--detach', 'HEAD']);
+
+        $check = json_decode((string) $this->controller()($this->request(self::TOKEN, ['action' => 'check']))->getContent(), true);
+        $response = $this->controller()($this->request(self::TOKEN, ['action' => 'commit']));
+
+        $this->assertNull($check['branch']);
+        $this->assertSame(500, $response->getStatusCode());
+        $this->assertStringContainsString('detached HEAD', (string) $response->getContent());
+        $this->assertFileDoesNotExist($this->project.'/_db/latest.sql');
+    }
+
+    public function testEnvAuthorTakesPrecedenceOverGitConfig(): void
+    {
+        $this->git($this->project, ['config', 'user.name', 'Server']);
+        $this->git($this->project, ['config', 'user.email', 'server@example.org']);
+
+        $response = $this->controller()($this->request(self::TOKEN, ['action' => 'commit']));
+
+        $this->assertSame(200, $response->getStatusCode(), (string) $response->getContent());
+        $this->assertSame('Agentur Test <agent@example.org>', $this->git($this->dir.'/remote.git', ['log', '-1', '--format=%an <%ae>', 'main']));
+    }
+
+    /**
+     * @dataProvider invalidAuthorProvider
+     */
+    public function testCommitRequiresAuthor(string $name, string $email): void
+    {
+        putenv('WORKMATE_AGENT_AUTHOR_NAME='.$name);
+        putenv('WORKMATE_AGENT_AUTHOR_EMAIL='.$email);
+
+        $check = json_decode((string) $this->controller()($this->request(self::TOKEN, ['action' => 'check']))->getContent(), true);
+        $response = $this->controller()($this->request(self::TOKEN, ['action' => 'commit']));
+
+        $this->assertNull($check['author']);
+        $this->assertSame(500, $response->getStatusCode());
+        $this->assertStringContainsString('WORKMATE_AGENT_AUTHOR_NAME', (string) $response->getContent());
+        $this->assertFileDoesNotExist($this->project.'/_db/latest.sql');
+    }
+
+    public function invalidAuthorProvider(): iterable
+    {
+        yield 'nothing set' => ['', ''];
+        yield 'no name' => ['', 'agent@example.org'];
+        yield 'no email' => ['Agentur Test', ''];
+        yield 'invalid email' => ['Agentur Test', 'agentur'];
+        yield 'name with angle brackets' => ['Agentur <x>', 'agent@example.org'];
     }
 
     public function testFailingBackupIsReported(): void

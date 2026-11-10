@@ -38,21 +38,24 @@ composer require pdir/contao-workmate-agent-bundle
 - `git` can be run by PHP (`proc_open`),
 - `_db/` is not ignored by `.gitignore`.
 
-Optional env variables (`.env.local`):
+Env variables (`.env.local`):
 
 | Variable | |
 |---|---|
-| `WORKMATE_AGENT_TOKEN_HASH` | hash of the token, takes precedence over `composer.json` |
-| `WORKMATE_AGENT_GIT` | git binary, e.g. `/usr/bin/git` |
-| `WORKMATE_AGENT_SSH_KEY` | SSH key for the push, e.g. `/home/user/.ssh/id_rsa_gitlab` |
+| `WORKMATE_AGENT_AUTHOR_NAME` | **required**, author name of the commits, e.g. `Agentur Beispiel` |
+| `WORKMATE_AGENT_AUTHOR_EMAIL` | **required**, author email of the commits, e.g. `noreply@agentur-beispiel.de` |
+| `WORKMATE_AGENT_TOKEN_HASH` | optional, hash of the token, takes precedence over `composer.json` |
+| `WORKMATE_AGENT_GIT` | optional, git binary, e.g. `/usr/bin/git` |
+| `WORKMATE_AGENT_SSH_KEY` | optional, SSH key for the push, e.g. `/home/user/.ssh/id_rsa_gitlab` |
 
 ## Check
 
-Checks the project, PHP, Git and GitLab, nothing is changed (only `git push --dry-run`). Run it as the PHP user in
-the project directory:
+Checks the project, PHP, Git and GitLab, nothing is changed (only `git push --dry-run`) unless `--fix` is passed. Run
+it as the PHP user in the project directory:
 
 ```bash
 vendor/bin/workmate-agent-check
+vendor/bin/workmate-agent-check --fix   # chmod 600 for contao-manager/auth.json and the SSH key (if they belong to the PHP user)
 WORKMATE_TOKEN=<token> vendor/bin/workmate-agent-check --url https://www.example.org   # also calls the agent
 ```
 
@@ -65,7 +68,7 @@ Exit code 0 = ready, 1 = errors.
 
 | `action` | |
 |---|---|
-| `check` | agent version, branch, remote, whether the working tree is clean and `_db/latest.sql` is ignored |
+| `check` | agent version, branch, remote, whether the working tree is clean and `_db/latest.sql` is ignored, commit author (`null` if not set) |
 | `commit` | backup, `_db/latest.sql`, commit with `message`, push |
 
 ## Tests

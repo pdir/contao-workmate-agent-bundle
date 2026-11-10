@@ -17,12 +17,11 @@ namespace Pdir\ContaoWorkmateAgentBundle\Agent;
 /**
  * runs git in the project directory (the user of the web server must be able to push, e.g. with a deploy key).
  *
+ * Required env variables: WORKMATE_AGENT_AUTHOR_NAME and WORKMATE_AGENT_AUTHOR_EMAIL (author of the commits).
  * Optional env variables: WORKMATE_AGENT_GIT (binary), WORKMATE_AGENT_SSH_KEY (key for the push).
  */
 class GitRepository
 {
-    public const AUTHOR_NAME = 'Workmate';
-    public const AUTHOR_EMAIL = 'workmate@pdir.de';
 
     /**
      * @var string
@@ -73,24 +72,36 @@ class GitRepository
     }
 
     /**
-     * -c user.name/user.email if git has no author.
+     * the author of the commits from WORKMATE_AGENT_AUTHOR_NAME and WORKMATE_AGENT_AUTHOR_EMAIL, null if not set.
+     *
+     * @return array{name: string, email: string}|null
+     */
+    public function author(): ?array
+    {
+        $name = self::env('WORKMATE_AGENT_AUTHOR_NAME');
+        $email = self::env('WORKMATE_AGENT_AUTHOR_EMAIL');
+
+        if ('' === $name || preg_match('/[\x00-\x1F\x7F<>]/', $name) || false === filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            return null;
+        }
+
+        return ['name' => $name, 'email' => $email];
+    }
+
+    /**
+     * -c user.name/user.email for the commit, the env variables take precedence over the git config of the server.
+     *
+     * @throws AgentException if the author is not set
      *
      * @return list<string>
      */
     public function authorOptions(): array
     {
-        $options = [];
-
-        foreach (['user.name' => self::AUTHOR_NAME, 'user.email' => self::AUTHOR_EMAIL] as $key => $default) {
-            [$code, $value] = $this->run(['config', $key]);
-
-            if (0 !== $code || '' === $value) {
-                $options[] = '-c';
-                $options[] = $key.'='.$default;
-            }
+        if (null === ($author = $this->author())) {
+            throw new AgentException('WORKMATE_AGENT_AUTHOR_NAME und WORKMATE_AGENT_AUTHOR_EMAIL (gültige E-Mail-Adresse) müssen in der .env.local gesetzt sein.');
         }
 
-        return $options;
+        return ['-c', 'user.name='.$author['name'], '-c', 'user.email='.$author['email']];
     }
 
     private function environment(): array
